@@ -4,6 +4,8 @@ import { defineConfig } from "rollup";
 import path from 'node:path';
 import { fileURLToPath } from "node:url";
 
+import rollupPlugin from './src/index.mjs';
+
 const files = await globby('./fixtures/*.tsx');
 
 export default defineConfig({
@@ -15,5 +17,6 @@ export default defineConfig({
     format: 'esm',
     dir: 'dist',
   },
-  jsx: 'preserve'
+  jsx: 'preserve',
+  plugins: [rollupPlugin()]
 })
