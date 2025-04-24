@@ -1,0 +1,10 @@
+{
+  "name": "jsx-to-string-experiments",
+  "version": "1.0.0",
+  "main": "index.js",
+  "repository": "git@github.com:nwalters512/jsx-to-string-experiments.git",
+  "author": "Nathan Sarang-Walters <nwalters512@gmail.com>",
+  "license": "MIT",
+  "private": true,
+  "packageManager": "yarn@4.9.1"
+}
