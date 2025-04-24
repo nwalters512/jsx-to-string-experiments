@@ -7,8 +7,13 @@
   "license": "MIT",
   "private": true,
   "packageManager": "yarn@4.9.1",
+  "scripts": {
+    "build": "rollup -c"
+  },
   "dependencies": {
-    "react": "^19.1.0"
+    "globby": "^14.1.0",
+    "react": "^19.1.0",
+    "rollup": "^4.40.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.2"
