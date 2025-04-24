@@ -1,3 +1,3 @@
 export function FixtureDiv() {
-  return <div>Hello, world</div>
+  return <div>Hello, world</div>;
 }

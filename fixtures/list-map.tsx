@@ -5,5 +5,5 @@ export function FixtureListMap() {
         <li key={i}>Hello, world</li>
       ))}
     </ul>
-  )
+  );
 }

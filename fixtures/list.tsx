@@ -5,5 +5,5 @@ export function FixtureList() {
       <li>Hello, world</li>
       <li>Hello, world</li>
     </ul>
-  )
+  );
 }
