@@ -43,12 +43,175 @@ const SELF_CLOSING_TAGS = new Set([
   'wbr',
 ]);
 
-/**
- * Converts JSX to html template literals
- * @param {object} jsxNode - The JSX node to convert
- * @param {object} babel - The Babel types object
- * @return {object} The result containing quasis and expressions
- */
+// Utility functions for attribute handling
+function processAttribute(attr, t) {
+  if (t.isJSXAttribute(attr)) {
+    const name = attr.name.name;
+    // Convert className to class
+    const attrName = name === 'className' ? 'class' : name;
+
+    if (attr.value === null) {
+      return { name: attrName, value: true, type: 'boolean' };
+    } else if (t.isStringLiteral(attr.value)) {
+      return { name: attrName, value: attr.value.value, type: 'string' };
+    } else if (t.isJSXExpressionContainer(attr.value)) {
+      if (t.isBooleanLiteral(attr.value.expression)) {
+        return attr.value.expression.value
+          ? { name: attrName, value: true, type: 'boolean' }
+          : { name: attrName, value: false, type: 'skip' };
+      }
+      return {
+        name: attrName,
+        value: attr.value.expression,
+        type: 'expression',
+      };
+    }
+  }
+  return null;
+}
+
+function processChildren(children, t) {
+  const results = [];
+  for (const child of children) {
+    if (t.isJSXText(child)) {
+      const text = child.value.trim();
+      if (text) {
+        results.push({
+          type: 'text',
+          value: text,
+        });
+      }
+    } else if (t.isJSXExpressionContainer(child)) {
+      if (!t.isJSXEmptyExpression(child.expression)) {
+        results.push({
+          type: 'expression',
+          value: child.expression,
+        });
+      }
+    } else if (t.isJSXElement(child)) {
+      results.push({
+        type: 'element',
+        value: jsxToTemplateLiteral(child, t),
+      });
+    } else if (t.isJSXFragment(child)) {
+      const fragmentResult = processJSXFragment(child, t);
+      if (fragmentResult.length > 0) {
+        results.push({
+          type: 'fragment',
+          value: fragmentResult,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function createTemplateFromChildren(children, t) {
+  const processed = processChildren(children, t);
+  const quasis = [];
+  const expressions = [];
+  let currentQuasi = '';
+
+  processed.forEach((item, index) => {
+    switch (item.type) {
+      case 'text':
+        currentQuasi += item.value;
+        break;
+      case 'expression':
+        quasis.push(
+          t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
+        );
+        expressions.push(item.value);
+        currentQuasi = '';
+        break;
+      case 'element':
+        quasis.push(
+          t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
+        );
+        expressions.push(
+          t.taggedTemplateExpression(
+            t.identifier('html'),
+            t.templateLiteral(item.value.quasis, item.value.expressions),
+          ),
+        );
+        currentQuasi = '';
+        break;
+      case 'fragment':
+        quasis.push(
+          t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
+        );
+        if (item.value.length === 1) {
+          expressions.push(item.value[0]);
+        } else {
+          expressions.push(t.arrayExpression(item.value));
+        }
+        currentQuasi = '';
+        break;
+    }
+  });
+
+  quasis.push(
+    t.templateElement({ raw: currentQuasi, cooked: undefined }, true),
+  );
+  return { quasis, expressions };
+}
+
+function extractDangerousHtml(attributes, t) {
+  for (const attr of attributes) {
+    if (
+      t.isJSXAttribute(attr) &&
+      attr.name.name === 'dangerouslySetInnerHTML'
+    ) {
+      if (
+        t.isJSXExpressionContainer(attr.value) &&
+        t.isObjectExpression(attr.value.expression)
+      ) {
+        const properties = attr.value.expression.properties;
+        for (const prop of properties) {
+          if (
+            t.isObjectProperty(prop) &&
+            (t.isIdentifier(prop.key, { name: '__html' }) ||
+              t.isStringLiteral(prop.key, { value: '__html' }))
+          ) {
+            return prop.value;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function createAttributesObject(attributes, t) {
+  const attrProps = [];
+  for (const attr of attributes) {
+    const processed = processAttribute(attr, t);
+    if (processed && processed.type !== 'skip') {
+      if (processed.type === 'boolean') {
+        attrProps.push(
+          t.objectProperty(
+            t.stringLiteral(processed.name),
+            t.booleanLiteral(processed.value),
+          ),
+        );
+      } else if (processed.type === 'string') {
+        attrProps.push(
+          t.objectProperty(
+            t.stringLiteral(processed.name),
+            t.stringLiteral(processed.value),
+          ),
+        );
+      } else if (processed.type === 'expression') {
+        attrProps.push(
+          t.objectProperty(t.stringLiteral(processed.name), processed.value),
+        );
+      }
+    }
+  }
+  return attrProps;
+}
+
+// Main JSX transformation functions
 function jsxToTemplateLiteral(jsxNode, t) {
   // Handle fragment case
   if (t.isJSXFragment(jsxNode)) {
@@ -59,79 +222,60 @@ function jsxToTemplateLiteral(jsxNode, t) {
 
   // Handle element case
   if (!t.isJSXIdentifier(openingElement.name)) {
-    // We don't handle complex tag names (like member expressions) yet
+    if (t.isJSXMemberExpression(openingElement.name)) {
+      const memberExpr = t.memberExpression(
+        t.identifier(openingElement.name.object.name),
+        t.identifier(openingElement.name.property.name),
+      );
+      return {
+        expressions: [t.callExpression(memberExpr, [t.objectExpression([])])],
+        quasis: [
+          t.templateElement({ raw: '', cooked: undefined }, false),
+          t.templateElement({ raw: '', cooked: undefined }, true),
+        ],
+      };
+    }
     return { quasis: [], expressions: [] };
   }
 
   const tag = openingElement.name.name;
-  const isComponent = /^[A-Z]/.test(tag);
+  const isCustomElement = tag.includes('-');
+  const isComponent = !isCustomElement && /^[A-Z]/.test(tag);
+  const isSelfClosing =
+    SELF_CLOSING_TAGS.has(tag.toLowerCase()) || !closingElement;
 
-  // For components, call the component function
+  // For components, handle differently
   if (isComponent) {
-    // Create props object
-    const propsObject = t.objectExpression([]);
-
-    // Process all attributes into props
-    for (const attr of openingElement.attributes) {
-      if (t.isJSXAttribute(attr)) {
-        const name = attr.name.name;
-        if (attr.value === null) {
-          propsObject.properties.push(
-            t.objectProperty(t.stringLiteral(name), t.booleanLiteral(true)),
-          );
-        } else if (t.isStringLiteral(attr.value)) {
-          propsObject.properties.push(
-            t.objectProperty(
-              t.stringLiteral(name),
-              t.stringLiteral(attr.value.value),
-            ),
-          );
-        } else if (t.isJSXExpressionContainer(attr.value)) {
-          propsObject.properties.push(
-            t.objectProperty(t.stringLiteral(name), attr.value.expression),
-          );
-        }
-      } else if (t.isJSXSpreadAttribute(attr)) {
-        propsObject.properties.push(t.spreadElement(attr.argument));
-      }
-    }
+    const propsObject = t.objectExpression(
+      createAttributesObject(openingElement.attributes, t),
+    );
 
     // Handle children if any
     if (children.length > 0) {
-      const childrenExpressions = [];
-      for (const child of children) {
-        if (t.isJSXText(child)) {
-          const text = child.value.trim();
-          if (text) {
-            childrenExpressions.push(t.stringLiteral(text));
-          }
-        } else if (t.isJSXExpressionContainer(child)) {
-          if (!t.isJSXEmptyExpression(child.expression)) {
-            childrenExpressions.push(child.expression);
-          }
-        } else if (t.isJSXElement(child)) {
-          const childResult = jsxToTemplateLiteral(child, t);
-          if (
-            childResult.expressions.length === 1 &&
-            t.isCallExpression(childResult.expressions[0])
-          ) {
-            childrenExpressions.push(childResult.expressions[0]);
-          } else {
-            childrenExpressions.push(
-              t.taggedTemplateExpression(
-                t.identifier('html'),
-                t.templateLiteral(childResult.quasis, childResult.expressions),
-              ),
+      const childrenResults = processChildren(children, t);
+      const childrenExpressions = childrenResults.map((result) => {
+        switch (result.type) {
+          case 'text':
+            return t.stringLiteral(result.value);
+          case 'expression':
+            return result.value;
+          case 'element':
+            return t.taggedTemplateExpression(
+              t.identifier('html'),
+              t.templateLiteral(result.value.quasis, result.value.expressions),
             );
-          }
+          case 'fragment':
+            return result.value.length === 1
+              ? result.value[0]
+              : t.arrayExpression(result.value);
         }
-      }
+      });
 
       if (childrenExpressions.length === 1) {
         propsObject.properties.push(
           t.objectProperty(t.stringLiteral('children'), childrenExpressions[0]),
         );
-      } else if (childrenExpressions.length > 1) {
+      } else if (childrenExpressions.length > 0) {
         propsObject.properties.push(
           t.objectProperty(
             t.stringLiteral('children'),
@@ -141,96 +285,37 @@ function jsxToTemplateLiteral(jsxNode, t) {
       }
     }
 
-    // Return the component call directly without toString()
     return {
       quasis: [
-        t.templateElement({ raw: '', cooked: '' }, false),
-        t.templateElement({ raw: '', cooked: '' }, true),
+        t.templateElement({ raw: '', cooked: undefined }, false),
+        t.templateElement({ raw: '', cooked: undefined }, true),
       ],
       expressions: [t.callExpression(t.identifier(tag), [propsObject])],
     };
   }
 
-  const isSelfClosing =
-    SELF_CLOSING_TAGS.has(tag.toLowerCase()) || !closingElement;
+  // Check for spread attributes
+  const hasSpreadAttrs = openingElement.attributes.some((attr) =>
+    t.isJSXSpreadAttribute(attr),
+  );
+  const dangerousHTML = extractDangerousHtml(openingElement.attributes, t);
 
-  // Build expressions and quasi parts
-  const expressions = [];
-  const quasis = [];
-
-  // Check for dangerouslySetInnerHTML
-  let hasDangerousHTML = false;
-  let dangerousHTMLExpression = null;
-
-  // Track if we have any spread attributes
-  let hasSpreadAttrs = false;
-
-  // First pass - collect any spread attributes
-  const spreadAttrs = [];
-  for (const attr of openingElement.attributes) {
-    if (t.isJSXSpreadAttribute(attr)) {
-      hasSpreadAttrs = true;
-      spreadAttrs.push(attr.argument);
-    }
-  }
-
-  // If we have spread attributes, use a different approach
   if (hasSpreadAttrs) {
-    // Start with the opening tag
-    let currentQuasi = `<${tag}`;
+    // Handle spread attributes case
+    const spreadAttrs = openingElement.attributes
+      .filter((attr) => t.isJSXSpreadAttribute(attr))
+      .map((attr) => attr.argument);
 
-    // Create an object with all the regular attributes
-    const attrProps = [];
+    const attrProps = createAttributesObject(
+      openingElement.attributes.filter((attr) => !t.isJSXSpreadAttribute(attr)),
+      t,
+    );
 
-    for (const attr of openingElement.attributes) {
-      if (t.isJSXAttribute(attr)) {
-        const name = attr.name.name;
+    const expressions = [];
+    const quasis = [];
+    let currentQuasi = `<${tag} `;
 
-        // Skip dangerouslySetInnerHTML, handle it separately
-        if (name === 'dangerouslySetInnerHTML') {
-          hasDangerousHTML = true;
-          if (
-            t.isJSXExpressionContainer(attr.value) &&
-            t.isObjectExpression(attr.value.expression)
-          ) {
-            const properties = attr.value.expression.properties;
-            for (const prop of properties) {
-              if (
-                t.isObjectProperty(prop) &&
-                (t.isIdentifier(prop.key, { name: '__html' }) ||
-                  t.isStringLiteral(prop.key, { value: '__html' }))
-              ) {
-                dangerousHTMLExpression = prop.value;
-                break;
-              }
-            }
-          }
-          continue;
-        }
-
-        // Convert className to class
-        const attrName = name === 'className' ? 'class' : name;
-
-        if (attr.value === null) {
-          attrProps.push(
-            t.objectProperty(t.stringLiteral(attrName), t.booleanLiteral(true)),
-          );
-        } else if (t.isStringLiteral(attr.value)) {
-          attrProps.push(
-            t.objectProperty(
-              t.stringLiteral(attrName),
-              t.stringLiteral(attr.value.value),
-            ),
-          );
-        } else if (t.isJSXExpressionContainer(attr.value)) {
-          attrProps.push(
-            t.objectProperty(t.stringLiteral(attrName), attr.value.expression),
-          );
-        }
-      }
-    }
-
-    // Create array of html template literals for each attribute
+    // Create dynamic attributes expression
     const attributesMapExpr = t.callExpression(
       t.memberExpression(
         t.callExpression(
@@ -255,23 +340,7 @@ function jsxToTemplateLiteral(jsxNode, t) {
           [
             t.arrowFunctionExpression(
               [t.arrayPattern([t.identifier('_'), t.identifier('v')])],
-              t.logicalExpression(
-                '&&',
-                t.binaryExpression('!=', t.identifier('v'), t.nullLiteral()),
-                t.logicalExpression(
-                  '&&',
-                  t.binaryExpression(
-                    '!==',
-                    t.identifier('v'),
-                    t.identifier('undefined'),
-                  ),
-                  t.binaryExpression(
-                    '!==',
-                    t.identifier('v'),
-                    t.booleanLiteral(false),
-                  ),
-                ),
-              ),
+              t.binaryExpression('!=', t.identifier('v'), t.nullLiteral()),
             ),
           ],
         ),
@@ -286,7 +355,6 @@ function jsxToTemplateLiteral(jsxNode, t) {
               t.identifier('v'),
               t.booleanLiteral(true),
             ),
-            // For boolean attributes, use a template with just the key
             t.taggedTemplateExpression(
               t.identifier('html'),
               t.templateLiteral(
@@ -297,7 +365,6 @@ function jsxToTemplateLiteral(jsxNode, t) {
                 [t.identifier('k')],
               ),
             ),
-            // For regular attributes, create key=value template
             t.taggedTemplateExpression(
               t.identifier('html'),
               t.templateLiteral(
@@ -314,260 +381,111 @@ function jsxToTemplateLiteral(jsxNode, t) {
       ],
     );
 
-    // Join the attributes with spaces using joinHtml
-    const joinedAttrsExpr = t.callExpression(t.identifier('joinHtml'), [
-      attributesMapExpr,
-      t.stringLiteral(' '),
-    ]);
-
     quasis.push(
-      t.templateElement({ raw: currentQuasi + ' ', cooked: undefined }, false),
+      t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
     );
-    expressions.push(joinedAttrsExpr);
+    expressions.push(
+      t.callExpression(t.identifier('joinHtml'), [
+        attributesMapExpr,
+        t.stringLiteral(' '),
+      ]),
+    );
 
-    // Close the opening tag
+    // Handle tag closing and children
     if (isSelfClosing) {
-      currentQuasi = '/>';
+      quasis.push(t.templateElement({ raw: '/>', cooked: undefined }, true));
     } else {
-      currentQuasi = '>';
-
-      // Process children
-      if (hasDangerousHTML && dangerousHTMLExpression) {
+      if (dangerousHTML) {
+        quasis.push(t.templateElement({ raw: '>', cooked: undefined }, false));
+        expressions.push(dangerousHTML);
         quasis.push(
-          t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
+          t.templateElement({ raw: `</${tag}>`, cooked: undefined }, true),
         );
-        expressions.push(
-          t.callExpression(t.identifier('escapeHtml'), [
-            dangerousHTMLExpression,
-          ]),
-        );
-        currentQuasi = `</${tag}>`;
       } else {
-        // Process children normally
-        for (const child of children) {
-          if (t.isJSXText(child)) {
-            // Append text directly
-            currentQuasi += child.value;
-          } else if (t.isJSXExpressionContainer(child)) {
-            // Skip comments
-            if (t.isJSXEmptyExpression(child.expression)) {
-              continue;
-            }
-
-            // Add expression container
-            quasis.push(
-              t.templateElement(
-                { raw: currentQuasi, cooked: undefined },
-                false,
-              ),
-            );
-            expressions.push(child.expression);
-            currentQuasi = '';
-          } else if (t.isJSXElement(child)) {
-            // Handle nested element
-            const nestedResult = jsxToTemplateLiteral(child, t);
-
-            // Create template for nested element
-            const nestedTemplate = t.taggedTemplateExpression(
-              t.identifier('html'),
-              t.templateLiteral(
-                nestedResult.quasis.map((q, i) =>
-                  t.templateElement(
-                    { raw: q.value.raw, cooked: undefined },
-                    i === nestedResult.quasis.length - 1,
-                  ),
-                ),
-                nestedResult.expressions,
-              ),
-            );
-
-            // Add to parent
-            quasis.push(
-              t.templateElement(
-                { raw: currentQuasi, cooked: undefined },
-                false,
-              ),
-            );
-            expressions.push(nestedTemplate);
-            currentQuasi = '';
-          }
-        }
-
-        // Add closing tag
-        currentQuasi += `</${tag}>`;
+        const childResult = createTemplateFromChildren(children, t);
+        quasis.push(
+          t.templateElement({ raw: '>', cooked: undefined }, false),
+          ...childResult.quasis.slice(0, -1),
+          t.templateElement(
+            {
+              raw:
+                childResult.quasis[childResult.quasis.length - 1].value.raw +
+                `</${tag}>`,
+              cooked: undefined,
+            },
+            true,
+          ),
+        );
+        expressions.push(...childResult.expressions);
       }
     }
 
-    quasis.push(
-      t.templateElement({ raw: currentQuasi, cooked: undefined }, true),
-    );
     return { quasis, expressions };
   }
 
-  // No spread attributes, use the standard approach
-  // Process attributes
-  let currentQuasi = `<${tag}`; // Initialize currentQuasi
+  // Standard (non-spread) attributes case
+  let currentQuasi = `<${tag}`;
+  const expressions = [];
+  const quasis = [];
 
+  // Process regular attributes
   for (const attr of openingElement.attributes) {
-    if (t.isJSXAttribute(attr)) {
-      const name = attr.name.name;
-
-      // Handle dangerouslySetInnerHTML specially
-      if (name === 'dangerouslySetInnerHTML') {
-        hasDangerousHTML = true;
-        // Extract the __html expression from the attribute value
-        if (
-          t.isJSXExpressionContainer(attr.value) &&
-          t.isObjectExpression(attr.value.expression)
-        ) {
-          const properties = attr.value.expression.properties;
-          for (const prop of properties) {
-            if (
-              t.isObjectProperty(prop) &&
-              (t.isIdentifier(prop.key, { name: '__html' }) ||
-                t.isStringLiteral(prop.key, { value: '__html' }))
-            ) {
-              dangerousHTMLExpression = prop.value;
-              break;
-            }
-          }
-        }
-        // Skip adding this attribute to the HTML output
+    const processed = processAttribute(attr, t);
+    if (processed && processed.type !== 'skip') {
+      currentQuasi += ' ' + processed.name;
+      if (processed.type === 'boolean' && processed.value === true) {
         continue;
       }
-
-      // Convert className to class
-      const attrName = name === 'className' ? 'class' : name;
-
-      if (attr.value === null) {
-        // Boolean attribute (like disabled, checked, etc.)
-        currentQuasi += ` ${attrName}`;
-      } else if (t.isStringLiteral(attr.value)) {
-        // Static attribute value
-        currentQuasi += ` ${attrName}="${attr.value.value}"`;
-      } else if (t.isJSXExpressionContainer(attr.value)) {
-        // Special case for boolean expressions
-        if (t.isBooleanLiteral(attr.value.expression)) {
-          if (attr.value.expression.value === true) {
-            currentQuasi += ` ${attrName}`;
-          }
-          // If false, don't add the attribute at all
-          continue;
-        }
-
-        // Dynamic attribute value
-        currentQuasi += ` ${attrName}="`;
+      currentQuasi += '="';
+      if (processed.type === 'string') {
+        currentQuasi += processed.value;
+      } else if (processed.type === 'expression') {
         quasis.push(
           t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
         );
-        expressions.push(attr.value.expression);
+        expressions.push(processed.value);
         currentQuasi = '"';
       }
+      currentQuasi += '"';
     }
   }
 
-  // Close opening tag - self-closing if needed
+  // Handle closing and children
   if (isSelfClosing) {
     currentQuasi += ' />';
+    quasis.push(
+      t.templateElement({ raw: currentQuasi, cooked: undefined }, true),
+    );
   } else {
     currentQuasi += '>';
 
-    // If self-closing, we don't process children or add a closing tag
-    // If we have dangerouslySetInnerHTML, handle it specially
-    if (hasDangerousHTML && dangerousHTMLExpression) {
+    if (dangerousHTML) {
       quasis.push(
         t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
       );
-
-      // Create escapeHtml call with the HTML content
-      const escapeHtmlCall = t.callExpression(t.identifier('escapeHtml'), [
-        dangerousHTMLExpression,
-      ]);
-
-      expressions.push(escapeHtmlCall);
-      currentQuasi = '';
+      expressions.push(dangerousHTML);
+      currentQuasi = `</${tag}>`;
+      quasis.push(
+        t.templateElement({ raw: currentQuasi, cooked: undefined }, true),
+      );
     } else {
-      // Process children normally
-      for (const child of children) {
-        if (t.isJSXText(child)) {
-          // Append text directly
-          currentQuasi += child.value;
-        } else if (t.isJSXExpressionContainer(child)) {
-          // Skip comments in JSX expressions
-          if (t.isJSXEmptyExpression(child.expression)) {
-            continue;
-          }
-
-          // Expression container
-          quasis.push(
-            t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
-          );
-          expressions.push(child.expression);
-          currentQuasi = '';
-        } else if (t.isJSXElement(child)) {
-          // Handle nested JSX element recursively
-          const nestedResult = jsxToTemplateLiteral(child, t);
-
-          // Create a new template literal for the nested element
-          const nestedQuasis = nestedResult.quasis.map((q, i) =>
-            t.templateElement(
-              { raw: q.value.raw, cooked: undefined },
-              i === nestedResult.quasis.length - 1,
-            ),
-          );
-
-          const nestedTemplate = t.taggedTemplateExpression(
-            t.identifier('html'),
-            t.templateLiteral(nestedQuasis, nestedResult.expressions),
-          );
-
-          // Add to parent's expressions
-          quasis.push(
-            t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
-          );
-          expressions.push(nestedTemplate);
-          currentQuasi = '';
-        } else if (t.isJSXFragment(child)) {
-          // Handle JSX fragments within elements by processing each child
-          const fragmentResult = processJSXFragment(child, t);
-
-          if (fragmentResult.length === 1) {
-            // Single item - just add it
-            quasis.push(
-              t.templateElement(
-                { raw: currentQuasi, cooked: undefined },
-                false,
-              ),
-            );
-            expressions.push(fragmentResult[0]);
-            currentQuasi = '';
-          } else if (fragmentResult.length > 1) {
-            // Multiple items - convert to array and add comment
-            quasis.push(
-              t.templateElement(
-                {
-                  raw: currentQuasi + '<!-- Fragment Start -->',
-                  cooked: undefined,
-                },
-                false,
-              ),
-            );
-
-            expressions.push(t.arrayExpression(fragmentResult));
-            currentQuasi = '<!-- Fragment End -->';
-          }
-          // Empty fragments are skipped
-        }
-      }
+      const childResult = createTemplateFromChildren(children, t);
+      quasis.push(
+        t.templateElement({ raw: currentQuasi, cooked: undefined }, false),
+        ...childResult.quasis.slice(0, -1),
+        t.templateElement(
+          {
+            raw:
+              childResult.quasis[childResult.quasis.length - 1].value.raw +
+              `</${tag}>`,
+            cooked: undefined,
+          },
+          true,
+        ),
+      );
+      expressions.push(...childResult.expressions);
     }
-
-    // Add closing tag
-    currentQuasi += `</${tag}>`;
   }
-
-  quasis.push(
-    t.templateElement({ raw: currentQuasi, cooked: undefined }, true),
-  );
 
   return { quasis, expressions };
 }
@@ -579,62 +497,64 @@ function jsxToTemplateLiteral(jsxNode, t) {
  * @return {Array} Array of template literals and expressions
  */
 function processJSXFragment(fragmentNode, t) {
+  if (!t.isJSXFragment(fragmentNode)) {
+    throw new Error('Expected a JSX Fragment node');
+  }
+
   const children = fragmentNode.children;
   const templateElements = [];
+  let hasContent = false;
 
   // Process each child into its own html template literal
   for (const child of children) {
     if (t.isJSXText(child)) {
       const text = child.value.trim();
       if (text) {
-        // Add non-empty text nodes as template literals
+        hasContent = true;
         templateElements.push(
           t.taggedTemplateExpression(
             t.identifier('html'),
             t.templateLiteral(
-              [
-                t.templateElement(
-                  { raw: child.value, cooked: undefined },
-                  true,
-                ),
-              ],
+              [t.templateElement({ raw: text, cooked: undefined }, true)],
               [],
             ),
           ),
         );
       }
     } else if (t.isJSXExpressionContainer(child)) {
-      // Skip comments in JSX expressions
-      if (t.isJSXEmptyExpression(child.expression)) {
-        continue;
+      if (!t.isJSXEmptyExpression(child.expression)) {
+        hasContent = true;
+        templateElements.push(child.expression);
       }
-
-      // Add expression containers directly
-      templateElements.push(child.expression);
     } else if (t.isJSXElement(child)) {
-      // Transform the element
+      hasContent = true;
       const result = jsxToTemplateLiteral(child, t);
-
-      // Create the tagged template expression
-      const elementTemplate = t.taggedTemplateExpression(
-        t.identifier('html'),
-        t.templateLiteral(
-          result.quasis.map((q, i) =>
-            t.templateElement(
-              { raw: q.value.raw, cooked: undefined },
-              i === result.quasis.length - 1,
+      templateElements.push(
+        t.taggedTemplateExpression(
+          t.identifier('html'),
+          t.templateLiteral(
+            result.quasis.map((q, i) =>
+              t.templateElement(
+                { raw: q.value.raw, cooked: undefined },
+                i === result.quasis.length - 1,
+              ),
             ),
+            result.expressions,
           ),
-          result.expressions,
         ),
       );
-
-      templateElements.push(elementTemplate);
     } else if (t.isJSXFragment(child)) {
-      // Handle nested fragments recursively
-      const nestedFragmentResults = processJSXFragment(child, t);
-      templateElements.push(...nestedFragmentResults);
+      const nestedResults = processJSXFragment(child, t);
+      if (nestedResults.length > 0) {
+        hasContent = true;
+        templateElements.push(...nestedResults);
+      }
     }
+  }
+
+  // If fragment is empty or only contains whitespace, return empty array
+  if (!hasContent) {
+    return [];
   }
 
   return templateElements;
