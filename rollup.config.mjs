@@ -7,7 +7,7 @@ import path from 'path';
 import rollupPlugin from './src/index.mjs';
 
 // Find all fixture files
-const fixtureFiles = await globby('./fixtures/*.tsx');
+const fixtureFiles = await globby('./fixtures/*.jsx');
 
 // Create a config for each fixture file
 export default fixtureFiles.map((fixturePath) => {
