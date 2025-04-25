@@ -9,14 +9,20 @@
   "packageManager": "yarn@4.9.1",
   "scripts": {
     "build": "rollup -c",
+    "test": "yarn build && node tests/run-tests.mjs",
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@babel/core": "^7.26.10",
+    "@babel/plugin-syntax-jsx": "^7.25.9",
     "globby": "^14.1.0",
     "react": "^19.1.0",
     "rollup": "^4.40.0"
   },
   "devDependencies": {
+    "@babel/types": "^7.27.0",
+    "@prairielearn/html": "^4.0.13",
+    "@types/babel__core": "^7",
     "@types/react": "^19.1.2",
     "prettier": "3.5.3"
   }
